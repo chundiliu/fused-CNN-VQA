@@ -1,0 +1,5 @@
+*.pyc
+*.npz
+*.h5
+*.json
+/pre-trained/*
