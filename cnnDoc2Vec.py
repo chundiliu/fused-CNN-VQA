@@ -19,12 +19,12 @@ class cnnDoc2Vec:
         self.batchSize = batchSize
         self.dropoutRate = dropoutRate
         self.data_place_holder = tf.placeholder(tf.float32,[self.batchSize,self.wordEmbeddingDim,self.maxWordNum,1])
-        self.label_place_holder = tf.placeholder(tf.float32, [100])
-        self.train_label_one_hot = tf.one_hot(tf.cast(self.label_place_holder, dtype = tf.int32), 2)
+        # self.label_place_holder = tf.placeholder(tf.float32, [batchSize])
+        # self.train_label_one_hot = tf.one_hot(tf.cast(self.label_place_holder, dtype = tf.int32), 2)
         self.inference()
-        logits = self.softmax_linear
-        self.acc_op = self.accuracy(logits, self.train_label_one_hot)
-        self.loss_op = self.loss(logits, self.train_label_one_hot)
+        # logits = self.softmax_linear
+        # self.acc_op = self.accuracy(logits, self.train_label_one_hot)
+        # self.loss_op = self.loss(logits, self.train_label_one_hot)
     def inference(self):
         with tf.variable_scope('conv1') as scope:
         #var = tf.get_variable(name, shape, initializer=initializer, dtype=dtype)

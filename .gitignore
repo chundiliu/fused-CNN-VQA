@@ -2,4 +2,6 @@
 *.npz
 *.h5
 *.json
+*.mat
+/model_save/*
 /pre-trained/*
