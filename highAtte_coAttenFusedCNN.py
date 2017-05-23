@@ -17,7 +17,7 @@ import codecs, json
 from tensorflow.contrib.rnn import core_rnn_cell
 from sklearn.metrics import average_precision_score
 from itertools import cycle
-
+from scipy.misc import imread, imresize
 
 from cnnDoc2Vec import cnnDoc2Vec
 from vgg16 import vgg16
@@ -35,7 +35,7 @@ dataPath = './pre-trained/'
 learning_rate = 3e-4			# learning rate for rmsprop
 #starter_learning_rate = 3e-4
 learning_rate_decay_start = -1		# at what iteration to start decaying learning rate? (-1 = dont)
-batch_size = 500			# batch_size for each iterations
+batch_size = 100			# batch_size for each iterations
 input_embedding_size = 300		# he encoding size of each token in the vocabulary
 num_output = 1000			# number of output answers
 img_norm = 1				# normalize the image feature. 1 = normalize, 0 = not normalize
@@ -50,6 +50,10 @@ max_itr = 150000
 n_epochs = 300
 max_words_q = 24
 num_answer = 1000
+
+weight_decay = 0.004
+
+attention_embedding_size = 512
 
 
 def get_data():
@@ -119,7 +123,7 @@ def get_data():
 			else:
 				prepro_que[i][j] = 3000000
 
-	ipdb.set_trace()
+	#ipdb.set_trace()
 	print('Normalizing image feature')
 	if img_norm:
 	    tem = np.sqrt(np.sum(np.multiply(img_feature, img_feature), axis=1))
@@ -203,67 +207,148 @@ def get_data_test():
 
 
 def train():
+	session_conf = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)
+	sess = tf.Session(config=session_conf)
 	print "loading training data"
 	[dataset, img_feature, train_data, word_vectors, word_to_index, indexMap] = get_data()
 	#ipdb.set_trace()
+	_, _, test_data, _, _, _ = get_data_test()
 	textCNN = cnnDoc2Vec(max_words_q, input_embedding_size, batch_size, dropoutRate)
 	#visualCNN = vgg16()
+	imgs = tf.placeholder(tf.float32, [batch_size, 224, 224, 3])
+	visualCNN = vgg16(imgs, 'pre-trained/vgg16_weights.npz',sess)
 	
 	#=================Build Fused Model
-	imageFeature = tf.placeholder(tf.float32, [batch_size, image_dim])
-	textFeature = textCNN.conv3
-	textFeature = tf.reshape(textFeature, [batch_size, 512 * 6])
-	fusedFeature = tf.concat([imageFeature, textFeature], 1)
+	#imageFeature = tf.placeholder(tf.float32, [batch_size, image_dim])
+	visualFeature = visualCNN.conv5_3 #500 14 14 512
+	textFeature = textCNN.conv3 #500 1 6 512
+	#textFeature = tf.reshape(textFeature, [batch_size, 512 * 6])
+	#fusedFeature = tf.concat([imageFeature, textFeature], 1)
+	textFeature = tf.reshape(textFeature, [batch_size, 1 * 6 , 512])
+	visualFeature = tf.reshape(visualFeature, [batch_size, 14 * 14, 512])
 
-	#Fully Connected Layer
-	#fuse_fc1
-	with tf.variable_scope('fuse_fc1') as scope:
-		shape = int(np.prod(fusedFeature.get_shape()[1:]))
+	V = tf.transpose(visualFeature, [0, 2, 1])
+	Q = tf.transpose(textFeature, [0, 2, 1])
+
+	
+	#############################Co-Attention Model################################
+
+
+	with tf.variable_scope('affinity_matrix') as scope:
 		try:
-			fc1w = tf.get_variable(
+			W = tf.get_variable(
 				name = "weights",
-				shape = [shape, 4096],
+				shape= [batch_size, 512, 512],
 				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
 				dtype=tf.float32)
-			fc1b = tf.get_variable(
-				name = "biases",
-				shape = [4096],
-				initializer = tf.constant_initializer(0.0, dtype = tf.float32),
-				dtype= tf.float32)
-		except Exception as e:
+		except Exception as  e:
 			scope.reuse_variables()
-			fc1w = tf.get_variable(name = "weights")
-			fc1b = tf.get_variable(name = "biases")
-		fc1l = tf.nn.bias_add(tf.matmul(fusedFeature, fc1w), fc1b)
-		fc1 = tf.nn.relu(fc1l)
+			W = tf.get_variable(name = "weights")
+		#visualFeature = tf.reshape(visualFeature, [batch_size, -1])
+		#textFeature = tf.reshape(textFeature, [batch_size, -1])
+		#W = tf.reshape(W, [batch_size, -1])
 
-	#fuse_fc2
-	with tf.variable_scope('fuse_fc2') as scope:
+		C = tf.matmul(Q, W, transpose_a = True)
+		C = tf.matmul(C, V)
+		C = tf.nn.tanh(C)
+
+	with tf.variable_scope('Hypo') as scope:
 		try:
-			fc2w = tf.get_variable(
-				name = "weights",
-				shape = [4096, 4096],
+			W_v = tf.get_variable(
+				name = "weights_v",
+				shape= [batch_size, attention_embedding_size, 512],
 				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
 				dtype=tf.float32)
-			fc2b = tf.get_variable(
-				name = "biases",
-				shape = [4096],
-				initializer = tf.constant_initializer(0.0, dtype = tf.float32),
-				dtype= tf.float32)
+			W_q = tf.get_variable(
+				name = "weights_q",
+				shape= [batch_size, attention_embedding_size, 512],
+				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
+				dtype=tf.float32)
+		except Exception as  e:
+			scope.reuse_variables()
+			W_v = tf.get_variable(name = "weights_v")
+			W_q = tf.get_variable(name = "weights_q")
+
+		corelate_v = tf.add(tf.matmul(W_v, V), tf.matmul(tf.matmul(W_q,Q),C))
+		H_v = tf.nn.tanh(corelate_v)
+
+		corelate_q = tf.add(tf.matmul(W_q, Q), tf.matmul(tf.matmul(W_v,V),C, transpose_b=True))
+		H_q = tf.nn.tanh(corelate_q)
+
+	with tf.variable_scope('attention') as scope:
+		try:
+			w_hv = tf.get_variable(
+				name = "w_hv",
+				shape= [batch_size, attention_embedding_size,1],
+				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
+				dtype=tf.float32)
+			w_hq = tf.get_variable(
+				name = "w_hq",
+				shape= [batch_size, attention_embedding_size, 1],
+				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
+				dtype=tf.float32)
 		except Exception as e:
 			scope.reuse_variables()
-			fc2w = tf.get_variable(name = "weights")
-			fc2b = tf.get_variable(name = "biases")
-		fc2l = tf.nn.bias_add(tf.matmul(fc1, fc2w), fc2b)
-		fc2 = tf.nn.relu(fc2l)
+			w_hv = tf.get_variable(name = "w_hv")
+			w_hq = tf.get_variable(name = "w_hq")
+		a_v = tf.nn.softmax(tf.matmul(w_hv, H_v, transpose_a= True))
+		a_q = tf.nn.softmax(tf.matmul(w_hq, H_q, transpose_a= True))
 
-	#fuse_fc3_softmax
+	V_weighted = tf.matmul(V, a_v, transpose_b=True)
+	Q_weighted = tf.matmul(Q, a_q, transpose_b=True)
+
+	fusedFeature = tf.concat([V_weighted, Q_weighted], 1)
+	fusedFeature = tf.reshape(fusedFeature, [batch_size, 1024])
+
+	# #Fully Connected Layer
+	# #fuse_fc1
+	# with tf.variable_scope('fuse_fc1') as scope:
+	# 	shape = int(np.prod(fusedFeature.get_shape()[1:]))
+	# 	try:
+	# 		fc1w = tf.get_variable(
+	# 			name = "weights",
+	# 			shape = [shape, 4096],
+	# 			initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
+	# 			dtype=tf.float32)
+	# 		fc1b = tf.get_variable(
+	# 			name = "biases",
+	# 			shape = [4096],
+	# 			initializer = tf.constant_initializer(0.0, dtype = tf.float32),
+	# 			dtype= tf.float32)
+	# 	except Exception as e:
+	# 		scope.reuse_variables()
+	# 		fc1w = tf.get_variable(name = "weights")
+	# 		fc1b = tf.get_variable(name = "biases")
+	# 	fc1l = tf.nn.bias_add(tf.matmul(fusedFeature, fc1w), fc1b)
+	# 	fc1 = tf.nn.relu(fc1l)
+
+	# #fuse_fc2
+	# with tf.variable_scope('fuse_fc2') as scope:
+	# 	try:
+	# 		fc2w = tf.get_variable(
+	# 			name = "weights",
+	# 			shape = [4096, 4096],
+	# 			initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
+	# 			dtype=tf.float32)
+	# 		fc2b = tf.get_variable(
+	# 			name = "biases",
+	# 			shape = [4096],
+	# 			initializer = tf.constant_initializer(0.0, dtype = tf.float32),
+	# 			dtype= tf.float32)
+	# 	except Exception as e:
+	# 		scope.reuse_variables()
+	# 		fc2w = tf.get_variable(name = "weights")
+	# 		fc2b = tf.get_variable(name = "biases")
+	# 	fc2l = tf.nn.bias_add(tf.matmul(fc1, fc2w), fc2b)
+	# 	fc2 = tf.nn.relu(fc2l)
+
+	# #fuse_fc3_softmax
 	with tf.variable_scope('fuse_fc3') as scope:
 		shape = int(np.prod(fusedFeature.get_shape()[1:]))
 		try:
 			fc3w = tf.get_variable(
 				name = "weights",
-				shape = [4096, 1000],
+				shape = [1024, 1000],
 				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
 				dtype=tf.float32)
 			fc3b = tf.get_variable(
@@ -275,7 +360,9 @@ def train():
 			scope.reuse_variables()
 			fc3w = tf.get_variable(name = "weights")
 			fc3b = tf.get_variable(name = "biases")
-		fc3l = tf.nn.bias_add(tf.matmul(fc2, fc3w), fc3b)
+		_weight_decay = tf.multiply(tf.nn.l2_loss(fc3w), weight_decay, name='weight_loss')
+		tf.add_to_collection('losses', _weight_decay)
+		fc3l = tf.nn.bias_add(tf.matmul(fusedFeature, fc3w), fc3b)
 		#fc3 = tf.nn.relu(fc3l)
 	#probs = tf.nn.softmax(fc3l)
 
@@ -284,15 +371,17 @@ def train():
 	label = tf.placeholder(tf.int32, [batch_size])
 	label_one_hot = tf.one_hot(tf.cast(label, dtype = tf.int32), num_answer)
 	losses = tf.nn.softmax_cross_entropy_with_logits(logits = fc3l, labels = label_one_hot)
-	loss_op = tf.reduce_mean(losses)
+	losses = tf.reduce_mean(losses)
+  	loss = tf.add_to_collection('losses', losses)
+
+  	loss_op = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
 	predictions = tf.argmax(tf.nn.softmax(fc3l), 1, name="predictions")
 	correct_predictions = tf.equal(predictions, tf.argmax(label_one_hot, 1))
 	accuracy = tf.reduce_mean(tf.cast(correct_predictions, "float"), name="accuracy")
 
 
-	session_conf = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)
-	sess = tf.Session(config=session_conf)
+	
 
 	saver = tf.train.Saver(max_to_keep=100)
 	tvars = tf.trainable_variables()
@@ -310,8 +399,14 @@ def train():
 		
 		current_answers = train_data['answers'][index]
 		current_img_list = train_data['img_list'][index]
-		current_img = img_feature[current_img_list,:]
+		temp = np.array(dataset['unique_img_train'])
+		current_img_files = temp[current_img_list]
 
+
+		current_img = np.zeros([batch_size, 224, 224, 3])
+		for i in range(batch_size):
+			current_img[i, :, :] = imresize(imread(current_img_files[i], mode='RGB'), (224, 224))
+		#ipdb.set_trace()
 		current_question = train_data['question'][index,:max_words_q]
 		#generate 4D tensor for CNN
 
@@ -325,6 +420,30 @@ def train():
 		#temp_4d = current_question[:, np.newaxis, :, np.newaxis]
 		#temp_4d = np.repeat(temp_4d, 300, 1)
 		
+	def generateTestBatches(index):
+		#ipdb.set_trace()
+		current_answers = test_data['answers'][index]
+		current_img_list = test_data['img_list'][index]
+		temp = np.array(dataset['unique_img_test'])
+		current_img_files = temp[current_img_list]
+
+
+		current_img = np.zeros([batch_size, 224, 224, 3])
+		for i in range(batch_size):
+			current_img[i, :, :] = imresize(imread(current_img_files[i], mode='RGB'), (224, 224))
+
+		current_question = test_data['question'][index,:max_words_q]
+		#generate 4D tensor for CNN
+
+		temp_4d = word_vectors[current_question]
+		temp_4d = np.swapaxes(temp_4d, 1, 2)
+		temp_4d = temp_4d[:, :, :, np.newaxis]
+
+		current_question = temp_4d
+
+		return current_question, current_answers, current_img
+		#temp_4d = current_question[:, np.newaxis, :, np.newaxis]
+		#temp_4d = np.repeat(temp_4d, 300, 1)
 
 	print "start training..."
 
@@ -339,166 +458,33 @@ def train():
 		for i in range(batchesPerEpoch):
 			index = shuffle_index[np.arange(i * batch_size, min((i + 1) * batch_size, dataSize))]
 			current_question, current_answers, current_img = generateBatches(index)
+			test_question, test_answers, test_img = generateTestBatches(np.random.random_integers(0, 121512-1, batch_size))
 			feed_dict = {
-				imageFeature : current_img,
+				imgs : current_img,
 				textCNN.data_place_holder : current_question,
 				label : current_answers
 				}
 			_, loss_out,acc_out = sess.run(
 				[train_op, loss_op, accuracy],
 				feed_dict)
-			print "Iteration: ", itr, " Loss: ", loss_out, " Learning Rate: ", lr.eval(session=sess), "acc", acc_out
+			feed_dict = {
+				imgs : test_img,
+				textCNN.data_place_holder : test_question,
+				label : test_answers
+				}
+			acc_out_test = sess.run(accuracy, feed_dict)
+			print "Iteration: ", itr, " Loss: ", loss_out, " Learning Rate: ", lr.eval(session=sess), "acc", acc_out,"test acc", acc_out_test
 			#textFeature, fusedFeature, probs, label, label_one_hot = sess.run([textFeature, fusedFeature, probs, label, label_one_hot], feed_dict)
 			#ipdb.set_trace()	
 		tStop = time.time()
 
-		if np.mod(itr, 1000) == 0:
+		if np.mod(itr, 100) == 0:
 			print "Iteration ", itr, " is done. Saving the model ..."
 			saver.save(sess, os.path.join(checkpoint_path, 'model'), global_step=itr)
 		#current_learning_rate = lr*decay_factor
 		#lr.assign(current_learning_rate).eval()
 	print "Finally, saving the model ..."
 	saver.save(sess, os.path.join(checkpoint_path, 'model'), global_step=itr)
-
-
-def test(model_path='model_save/model-50'):
-	print "loading test data"
-	[dataset, img_feature, test_data, word_vectors, word_to_index, indexMap] = get_data_test()
-	#ipdb.set_trace()
-	textCNN = cnnDoc2Vec(max_words_q, input_embedding_size, batch_size, dropoutRate)
-	#visualCNN = vgg16()
-	
-	#=================Build Fused Model
-	imageFeature = tf.placeholder(tf.float32, [batch_size, image_dim])
-	textFeature = textCNN.conv3
-	textFeature = tf.reshape(textFeature, [batch_size, 512 * 6])
-	fusedFeature = tf.concat([imageFeature, textFeature], 1)
-
-	#Fully Connected Layer
-	#fuse_fc1
-	with tf.variable_scope('fuse_fc1') as scope:
-		shape = int(np.prod(fusedFeature.get_shape()[1:]))
-		try:
-			fc1w = tf.get_variable(
-				name = "weights",
-				shape = [shape, 4096],
-				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
-				dtype=tf.float32)
-			fc1b = tf.get_variable(
-				name = "biases",
-				shape = [4096],
-				initializer = tf.constant_initializer(0.0, dtype = tf.float32),
-				dtype= tf.float32)
-		except Exception as e:
-			scope.reuse_variables()
-			fc1w = tf.get_variable(name = "weights")
-			fc1b = tf.get_variable(name = "biases")
-		fc1l = tf.nn.bias_add(tf.matmul(fusedFeature, fc1w), fc1b)
-		fc1 = tf.nn.relu(fc1l)
-
-	#fuse_fc2
-	with tf.variable_scope('fuse_fc2') as scope:
-		try:
-			fc2w = tf.get_variable(
-				name = "weights",
-				shape = [4096, 4096],
-				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
-				dtype=tf.float32)
-			fc2b = tf.get_variable(
-				name = "biases",
-				shape = [4096],
-				initializer = tf.constant_initializer(0.0, dtype = tf.float32),
-				dtype= tf.float32)
-		except Exception as e:
-			scope.reuse_variables()
-			fc2w = tf.get_variable(name = "weights")
-			fc2b = tf.get_variable(name = "biases")
-		fc2l = tf.nn.bias_add(tf.matmul(fc1, fc2w), fc2b)
-		fc2 = tf.nn.relu(fc2l)
-
-	#fuse_fc3_softmax
-	with tf.variable_scope('fuse_fc3') as scope:
-		shape = int(np.prod(fusedFeature.get_shape()[1:]))
-		try:
-			fc3w = tf.get_variable(
-				name = "weights",
-				shape = [4096, 1000],
-				initializer = tf.truncated_normal_initializer(stddev = 5e-2, dtype = tf.float32),
-				dtype=tf.float32)
-			fc3b = tf.get_variable(
-				name = "biases",
-				shape = [1000],
-				initializer = tf.constant_initializer(0.0, dtype = tf.float32),
-				dtype= tf.float32)
-		except Exception as e:
-			scope.reuse_variables()
-			fc3w = tf.get_variable(name = "weights")
-			fc3b = tf.get_variable(name = "biases")
-		fc3l = tf.nn.bias_add(tf.matmul(fc2, fc3w), fc3b)
-		#fc3 = tf.nn.relu(fc3l)
-	probs = tf.nn.softmax(fc3l)
-
-	label = tf.placeholder(tf.int32, [batch_size])
-	label_one_hot = tf.one_hot(tf.cast(label, dtype = tf.int32), num_answer)
-	losses = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = fc3l, labels = label)
-	loss_op = tf.reduce_mean(losses)
-
-
-	predictions = tf.argmax(probs, 1, name="predictions")
-	correct_predictions = tf.equal(predictions, tf.argmax(label_one_hot, 1))
-	accuracy = tf.reduce_mean(tf.cast(correct_predictions, "float"), name="accuracy")
-
-	session_conf = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)
-	sess = tf.Session(config=session_conf)
-
-	saver = tf.train.Saver()
-	saver.restore(sess, model_path)	
-
-	def generateBatches(index):
-		
-		current_answers = test_data['answers'][index]
-		current_img_list = test_data['img_list'][index]
-		current_img = img_feature[current_img_list,:]
-
-		current_question = test_data['question'][index,:max_words_q]
-		#generate 4D tensor for CNN
-
-		temp_4d = word_vectors[current_question]
-		temp_4d = np.swapaxes(temp_4d, 1, 2)
-		temp_4d = temp_4d[:, :, :, np.newaxis]
-
-		current_question = temp_4d
-
-		return current_question, current_answers, current_img
-		#temp_4d = current_question[:, np.newaxis, :, np.newaxis]
-		#temp_4d = np.repeat(temp_4d, 300, 1)
-		
-
-	print "start testing..."
-
-
-
-
-	dataSize = len(test_data['question'])
-	batchesPerEpoch = dataSize / batch_size
-	#shuffle_index = np.random.permutation(dataSize)
-	indices_set = np.arange(dataSize)
-
-	for i in range(batchesPerEpoch):
-		index = indices_set[np.arange(i * batch_size, min((i + 1) * batch_size, dataSize))]
-		if len(index) < batch_size:
-			break
-		current_question, current_answers, current_img = generateBatches(index)
-		feed_dict = {
-			imageFeature : current_img,
-			textCNN.data_place_holder : current_question,
-			label : current_answers
-			}
-		print sess.run(accuracy,feed_dict)
-		#textFeature, fusedFeature, probs, label, label_one_hot = sess.run([textFeature, fusedFeature, probs, label, label_one_hot], feed_dict)
-		#ipdb.set_trace()	
-
-
 
 
 train()
