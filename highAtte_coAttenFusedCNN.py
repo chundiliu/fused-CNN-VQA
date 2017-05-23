@@ -119,7 +119,7 @@ def get_data():
 			else:
 				prepro_que[i][j] = 3000000
 
-	#ipdb.set_trace()
+	ipdb.set_trace()
 	print('Normalizing image feature')
 	if img_norm:
 	    tem = np.sqrt(np.sum(np.multiply(img_feature, img_feature), axis=1))
@@ -279,10 +279,16 @@ def train():
 		#fc3 = tf.nn.relu(fc3l)
 	#probs = tf.nn.softmax(fc3l)
 
+
+
 	label = tf.placeholder(tf.int32, [batch_size])
 	label_one_hot = tf.one_hot(tf.cast(label, dtype = tf.int32), num_answer)
-	losses = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = fc3l, labels = label)
+	losses = tf.nn.softmax_cross_entropy_with_logits(logits = fc3l, labels = label_one_hot)
 	loss_op = tf.reduce_mean(losses)
+
+	predictions = tf.argmax(tf.nn.softmax(fc3l), 1, name="predictions")
+	correct_predictions = tf.equal(predictions, tf.argmax(label_one_hot, 1))
+	accuracy = tf.reduce_mean(tf.cast(correct_predictions, "float"), name="accuracy")
 
 
 	session_conf = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)
@@ -338,10 +344,10 @@ def train():
 				textCNN.data_place_holder : current_question,
 				label : current_answers
 				}
-			_, loss_out = sess.run(
-				[train_op, loss_op],
+			_, loss_out,acc_out = sess.run(
+				[train_op, loss_op, accuracy],
 				feed_dict)
-			print "Iteration: ", itr, " Loss: ", loss_out, " Learning Rate: ", lr.eval(session=sess)
+			print "Iteration: ", itr, " Loss: ", loss_out, " Learning Rate: ", lr.eval(session=sess), "acc", acc_out
 			#textFeature, fusedFeature, probs, label, label_one_hot = sess.run([textFeature, fusedFeature, probs, label, label_one_hot], feed_dict)
 			#ipdb.set_trace()	
 		tStop = time.time()
@@ -355,7 +361,7 @@ def train():
 	saver.save(sess, os.path.join(checkpoint_path, 'model'), global_step=itr)
 
 
-def test(model_path='model_save/model-0'):
+def test(model_path='model_save/model-50'):
 	print "loading test data"
 	[dataset, img_feature, test_data, word_vectors, word_to_index, indexMap] = get_data_test()
 	#ipdb.set_trace()
@@ -495,4 +501,4 @@ def test(model_path='model_save/model-0'):
 
 
 
-test()
+train()

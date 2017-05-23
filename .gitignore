@@ -3,5 +3,7 @@
 *.h5
 *.json
 *.mat
+*.zip
+*.tar
 /model_save/*
 /pre-trained/*
